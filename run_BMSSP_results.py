@@ -1,10 +1,140 @@
+import math
+import heapq
+from collections import defaultdict, deque
 import csv
 import glob
 import os
-import math
-from collections import defaultdict
-import heapq
-import time  # <- novo
+import time
+
+# -----------------------------
+# Types and constants
+# -----------------------------
+INF = float("inf")
+
+# ----------------------------
+# Util: construir adjacency
+# ----------------------------
+def build_adj(n, edges):
+    adj = [[] for _ in range(n)]
+    for (u, v, w) in edges:
+        adj[u].append((v, w))
+    return adj
+
+# ----------------------------
+# Pivot: mediana de três
+# ----------------------------
+def median_of_three_pivot(S, dhat):
+    nodes = list(S)
+    m = len(nodes)
+    if m == 0:
+        raise ValueError("S vazio no pivot")
+    if m <= 3:
+        return nodes[m // 2]
+    a = min(nodes, key=lambda x: dhat[x])
+    b = nodes[m // 2]
+    c = max(nodes, key=lambda x: dhat[x])
+    da, db, dc = dhat[a], dhat[b], dhat[c]
+    if da <= db <= dc:
+        return b
+    if db <= da <= dc:
+        return a
+    return c
+
+# ----------------------------
+# Dijkstra limitado por bound
+# ----------------------------
+def dijkstra_limited(S, B, adj, dhat):
+    """
+    Executa Dijkstra iniciando com os vértices de S (com distancias em dhat already set),
+    mas **não relaxa** arestas que gerariam distância > B.
+    Atualiza dhat in-place.
+    """
+    # heap de (dist, vertex)
+    heap = []
+    pushed = set()
+
+    for v in S:
+        # Só insere se dhat[v] for finito e <= B
+        if dhat[v] < INF and dhat[v] <= B:
+            heapq.heappush(heap, (dhat[v], v))
+            pushed.add(v)
+
+    while heap:
+        d, u = heapq.heappop(heap)
+        # se essa entrada está desatualizada, ignora
+        if d != dhat[u]:
+            continue
+        # se o menor elemento excede B, podemos parar: heap ordenado por distância
+        if d > B:
+            break
+        # relaxa vizinhos, mas respeita bound
+        for (v, w) in adj[u]:
+            nd = d + w
+            if nd < dhat[v] and nd <= B:
+                dhat[v] = nd
+                heapq.heappush(heap, (nd, v))
+    # retorna sem nada (dhat modificado in-place)
+
+# ----------------------------
+# BMSSP iterativo (pilha)
+# ----------------------------
+def bmssp(n, edges, source=0, B_initial=INF):
+    """
+    Implementação BMSSP usando Dijkstra limitado como subrotina.
+    Retorna vetor de distâncias dhat[0..n-1].
+    """
+    adj = build_adj(n, edges)
+
+    # inicializa dhat
+    dhat = [INF] * n
+    dhat[source] = 0.0
+
+    # pilha de frames (B, S)
+    stack = [(B_initial, {source})]
+
+    while stack:
+        B, S = stack.pop()
+        if not S:
+            continue
+
+        # caso base: se S pequeno ou B pequeno, rodar dijkstra limitado direto
+        if len(S) == 1 or B <= 1.0:
+            dijkstra_limited(S, B, adj, dhat)
+            continue
+
+        # escolhe pivot
+        pivot = median_of_three_pivot(S, dhat)
+        bound = min(B, dhat[pivot])
+
+        # se bound não reduz nada, faz dijkstra limitado com B
+        if abs(bound - B) < 1e-12:
+            dijkstra_limited(S, B, adj, dhat)
+            continue
+
+        # executa dijkstra limitado até 'bound'
+        dijkstra_limited(S, bound, adj, dhat)
+
+        # particiona S em left e right usando apenas os vértices de S
+        left = set()
+        right = set()
+        for u in S:
+            d = dhat[u]
+            if d == INF:
+                continue
+            # inclui tolerância numérica pequena
+            if d <= bound + 1e-12:
+                left.add(u)
+            elif d < B - 1e-12:
+                right.add(u)
+
+        # empilha subproblemas (apenas se reduzir o tamanho)
+        # ordem de push: right depois left (porque stack LIFO) — não obrigatório
+        if right and len(right) < len(S):
+            stack.append((B, right))
+        if left and len(left) < len(S):
+            stack.append((bound, left))
+
+    return dhat
 
 def load_graph_from_csv(path):
     """
@@ -37,172 +167,6 @@ def load_graph_from_csv(path):
 
     n = max(vertices) + 1
     return n, edges
-
-INF = float("inf")
-
-# ======================================
-#   Graph
-# ======================================
-class Graph:
-    def __init__(self, n, edges):
-        self.n = n
-        self.adj = defaultdict(list)
-        for (u, v, w) in edges:
-            self.adj[u].append((v, float(w)))
-
-    def out_edges(self, u):
-        return self.adj[u]
-
-
-# ======================================
-#   NodeSet
-# ======================================
-class NodeSet(set):
-    def has(self, v):
-        return v in self
-
-
-# ======================================
-#   Median of three
-# ======================================
-def median_of_three_pivot(S: NodeSet, dhat: dict):
-    nodes = list(S)
-    if len(nodes) <= 3:
-        return nodes[len(nodes)//2]
-
-    sorted_nodes = sorted(nodes, key=lambda x: dhat[x])
-    first = sorted_nodes[0]
-    middle = sorted_nodes[len(sorted_nodes)//2]
-    last = sorted_nodes[-1]
-
-    cand = [first, middle, last]
-    cand.sort(key=lambda x: dhat[x])
-    return cand[1]
-
-
-# ======================================
-#   BucketQueue (Δ-stepping)
-# ======================================
-class BucketQueue:
-    def __init__(self, delta):
-        self.delta = float(delta)
-        self.buckets = []
-        self.min_idx = 0
-        self.pos = {}
-
-    def _ensure_bucket(self, idx):
-        while idx >= len(self.buckets):
-            self.buckets.append([])
-
-    def insert(self, v, dist):
-        idx = int(dist / self.delta)
-        self._ensure_bucket(idx)
-        self.buckets[idx].append(v)
-        self.pos[v] = idx
-
-    def extract_min(self):
-        while self.min_idx < len(self.buckets) and not self.buckets[self.min_idx]:
-            self.min_idx += 1
-
-        if self.min_idx >= len(self.buckets):
-            return None, False
-
-        v = self.buckets[self.min_idx].pop(0)
-        del self.pos[v]
-        return v, True
-
-    def decrease_key(self, v, new_dist):
-        if v in self.pos:
-            old = self.pos[v]
-            bucket = self.buckets[old]
-            for i in range(len(bucket)):
-                if bucket[i] == v:
-                    bucket.pop(i)
-                    break
-        self.insert(v, new_dist)
-
-
-# ======================================
-#   Δ-stepping bounded Dijkstra
-# ======================================
-def dijkstra_delta_stepping(S: NodeSet, B, G: Graph, dhat, delta):
-    q = BucketQueue(delta)
-
-    for s in S:
-        q.insert(s, dhat[s])
-
-    while True:
-        u, ok = q.extract_min()
-        if not ok:
-            break
-
-        du = dhat[u]
-        if du >= B:
-            continue
-
-        for (v, w) in G.out_edges(u):
-            nd = du + w
-            if nd < dhat[v]:
-                dhat[v] = nd
-                if nd < B:
-                    q.decrease_key(v, nd)
-
-
-# ======================================
-#   BMSSP core (recursivo)
-# ======================================
-def BMSSP_core(B, S: NodeSet, G: Graph, dhat):
-    if len(S) == 0:
-        return
-
-    if len(S) == 1 or B <= 1.0:
-        dijkstra_delta_stepping(S, B, G, dhat, delta=1.0)
-        return
-
-    pivot = median_of_three_pivot(S, dhat)
-    bound = min(B, dhat[pivot])
-
-    if abs(bound - B) < 1e-9:
-        dijkstra_delta_stepping(S, B, G, dhat, delta=1.0)
-        return
-
-    dijkstra_delta_stepping(S, bound, G, dhat, delta=1.0)
-
-    left = NodeSet()
-    right = NodeSet()
-
-    # separa por dhat
-    for u in range(G.n):
-        if dhat[u] < INF:
-            if dhat[u] <= bound:
-                left.add(u)
-            elif dhat[u] < B:
-                right.add(u)
-
-    if 0 < len(left) < len(S):
-        BMSSP_core(bound, left, G, dhat)
-
-    if 0 < len(right) < len(S):
-        BMSSP_core(B, right, G, dhat)
-
-
-# ======================================
-#   Novo BMSSP(n, edges, source)
-# ======================================
-def BMSSP(n, edges, source):
-    G = Graph(n, edges)
-
-    # inicializa distâncias
-    dhat = {i: INF for i in range(n)}
-    dhat[source] = 0.0
-
-    # conjunto inicial contém apenas a fonte
-    S = NodeSet([source])
-
-    # busca ilimitada
-    BMSSP_core(INF, S, G, dhat)
-
-    return dhat
 
 def save_distances_to_csv(path_out, dist):
     """
@@ -246,8 +210,10 @@ def main():
                 continue
 
             inicio = time.perf_counter()  # início da medição
-            dist = BMSSP(n, edges, source=0)
-            dist = list(dist.values())
+            #dist = BMSSP(n, edges, source=0)
+            
+            dist = bmssp(n, edges)
+            #dist = list(dist.values())
             fim = time.perf_counter()     # fim da medição
             elapsed = fim - inicio
 
